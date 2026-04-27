@@ -5,7 +5,7 @@ export default function Page() {
       <h2>nippo</h2>
       <p>Slack message shortcut → Backlog daily report comment.</p>
       <p>
-        Endpoint: <code>POST /api/slack-to-backlog</code>
+        Endpoint: <code>POST /api/nippo/slack-to-backlog</code>
       </p>
     </main>
   );
