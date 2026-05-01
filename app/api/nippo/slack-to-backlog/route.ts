@@ -13,7 +13,7 @@ const APIKEY_ACTION_ID = "apikey_input";
 const SIGNATURE_VERSION = "v0";
 const SIGNATURE_TOLERANCE_SEC = 60 * 5;
 const RATE_LIMIT_WINDOW_SEC = 60 * 5;
-const POSTED_TTL_SEC = 60 * 60 * 24 * 30;
+const COMMENTS_MAX_PAGES = 5;
 
 const redis = Redis.fromEnv();
 
@@ -117,16 +117,9 @@ async function handleMessageAction(
   }
 
   const messageText = payload.message?.text ?? "";
-  const messageTs = payload.message?.ts ?? "";
-  const channelId = payload.channel?.id ?? "";
   const userLabel = resolveUserLabel(payload.user);
 
-  const guard = await checkPostGuards({
-    userId,
-    channelId,
-    messageTs,
-    messageText,
-  });
+  const guard = await checkPostGuards({ userId, messageText });
   if (!guard.ok) {
     try {
       await openModal({ triggerId, view: viewForGuardFailure(guard) });
@@ -142,12 +135,7 @@ async function handleMessageAction(
   const apiKey = await getUserApiKey(userId);
 
   if (!apiKey) {
-    const ctx = encodeContext({
-      messageText,
-      userLabel,
-      channelId,
-      messageTs,
-    });
+    const ctx = encodeContext({ messageText, userLabel });
     try {
       await openModal({
         triggerId,
@@ -186,7 +174,7 @@ async function handleMessageAction(
         userLabel,
       });
       if (result.ok) {
-        await recordPosted({ userId, channelId, messageTs });
+        await recordRateLimit(userId);
       }
       await updateModal({ viewId, view: viewForResult(result) });
     } catch (error) {
@@ -235,8 +223,6 @@ async function handleViewSubmission(
 
   const guard = await checkPostGuards({
     userId,
-    channelId: ctx.channelId,
-    messageTs: ctx.messageTs,
     messageText: ctx.messageText,
   });
   if (!guard.ok) {
@@ -253,11 +239,7 @@ async function handleViewSubmission(
           userLabel: ctx.userLabel,
         });
         if (result.ok) {
-          await recordPosted({
-            userId,
-            channelId: ctx.channelId,
-            messageTs: ctx.messageTs,
-          });
+          await recordRateLimit(userId);
         }
         await updateModal({ viewId, view: viewForResult(result) });
       } catch (error) {
@@ -320,11 +302,6 @@ type SlackUser = {
 
 type SlackMessage = {
   text?: string;
-  ts?: string;
-};
-
-type SlackChannel = {
-  id?: string;
 };
 
 type SlackMessageActionPayload = {
@@ -333,7 +310,6 @@ type SlackMessageActionPayload = {
   trigger_id?: string;
   user?: SlackUser;
   message?: SlackMessage;
-  channel?: SlackChannel;
 };
 
 type SlackViewStateValue = {
@@ -370,8 +346,6 @@ type SlackPayload =
 type ShortcutContext = {
   messageText: string;
   userLabel: string;
-  channelId: string;
-  messageTs: string;
 };
 
 function encodeContext(ctx: ShortcutContext): string {
@@ -387,11 +361,7 @@ function decodeContext(raw: string | undefined): ShortcutContext | null {
       typeof parsed.messageText === "string" ? parsed.messageText : "";
     const userLabel =
       typeof parsed.userLabel === "string" ? parsed.userLabel : "unknown";
-    const channelId =
-      typeof parsed.channelId === "string" ? parsed.channelId : "";
-    const messageTs =
-      typeof parsed.messageTs === "string" ? parsed.messageTs : "";
-    return { messageText, userLabel, channelId, messageTs };
+    return { messageText, userLabel };
   } catch {
     return null;
   }
@@ -626,10 +596,13 @@ function buildEmptyMessageView(): ModalView {
   };
 }
 
-function buildDuplicateView(): ModalView {
+function buildAlreadyCommentedView(params: {
+  summary: string;
+  url: string;
+}): ModalView {
   return {
     type: "modal",
-    callback_id: "nippo_warning_duplicate",
+    callback_id: "nippo_already_commented",
     title: { type: "plain_text", text: "投稿済み" },
     close: { type: "plain_text", text: "閉じる" },
     blocks: [
@@ -637,8 +610,17 @@ function buildDuplicateView(): ModalView {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: ":warning: このメッセージは既にBacklogへ投稿済みです。再投稿は行いません。",
+          text: `:warning: あなたは既にこの課題にコメントを投稿しています。\n*課題:* <${params.url}|${params.summary}>`,
         },
+      },
+      {
+        type: "context",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: "再投稿したい場合はBacklog側で既存コメントを削除してから実行してください。",
+          },
+        ],
       },
     ],
   };
@@ -672,8 +654,6 @@ function viewForGuardFailure(guard: GuardFailure): ModalView {
   switch (guard.reason) {
     case "empty":
       return buildEmptyMessageView();
-    case "duplicate":
-      return buildDuplicateView();
     case "rate_limited":
       return buildRateLimitedView(guard.remainingSec);
   }
@@ -687,7 +667,13 @@ function viewForResult(result: PostResult): ModalView {
       url: result.url,
     });
   }
-  return buildNoIssueView(result.today);
+  if (result.reason === "no_issue") {
+    return buildNoIssueView(result.today);
+  }
+  return buildAlreadyCommentedView({
+    summary: result.summary,
+    url: result.url,
+  });
 }
 
 function resolveUserLabel(user: SlackUser | undefined): string {
@@ -701,7 +687,14 @@ function resolveUserLabel(user: SlackUser | undefined): string {
 
 type PostResult =
   | { ok: true; issueKey: string; summary: string; url: string }
-  | { ok: false; today: Date };
+  | { ok: false; reason: "no_issue"; today: Date }
+  | {
+      ok: false;
+      reason: "already_commented";
+      issueKey: string;
+      summary: string;
+      url: string;
+    };
 
 async function postNippoComment(params: {
   apiKey: string;
@@ -711,11 +704,10 @@ async function postNippoComment(params: {
   const { apiKey, messageText, userLabel } = params;
   const spaceId = requireEnv("BACKLOG_SPACE_ID");
 
-  const projectId = await fetchProjectId({
-    spaceId,
-    apiKey,
-    projectKey: BACKLOG_PROJECT_KEY,
-  });
+  const [projectId, myUserId] = await Promise.all([
+    fetchProjectId({ spaceId, apiKey, projectKey: BACKLOG_PROJECT_KEY }),
+    fetchMyselfId({ spaceId, apiKey }),
+  ]);
 
   const today = todayJstDateOnly();
   const issue = await findIssueForToday({
@@ -729,7 +721,25 @@ async function postNippoComment(params: {
     console.error(
       `[nippo/slack-to-backlog] no matching issue for ${userLabel} on ${formatJstDate(today)}.`,
     );
-    return { ok: false, today };
+    return { ok: false, reason: "no_issue", today };
+  }
+
+  const url = `https://${spaceId}.backlog.com/view/${issue.issueKey}`;
+
+  const alreadyCommented = await hasUserCommentedOnIssue({
+    spaceId,
+    apiKey,
+    issueKey: issue.issueKey,
+    myUserId,
+  });
+  if (alreadyCommented) {
+    return {
+      ok: false,
+      reason: "already_commented",
+      issueKey: issue.issueKey,
+      summary: issue.summary,
+      url,
+    };
   }
 
   const content = buildCommentContent(issue.summary, messageText);
@@ -745,7 +755,7 @@ async function postNippoComment(params: {
     ok: true,
     issueKey: issue.issueKey,
     summary: issue.summary,
-    url: `https://${spaceId}.backlog.com/view/${issue.issueKey}`,
+    url,
   };
 }
 
@@ -859,6 +869,96 @@ async function fetchProjectId(params: {
   return project.id;
 }
 
+async function fetchMyselfId(params: {
+  spaceId: string;
+  apiKey: string;
+}): Promise<number> {
+  const { spaceId, apiKey } = params;
+  const url = `https://${spaceId}.backlog.com/api/v2/users/myself?apiKey=${encodeURIComponent(apiKey)}`;
+
+  const res = await fetch(url);
+  if (!res.ok) {
+    const errorText = await res.text().catch(() => "<no body>");
+    throw new Error(`Backlog myself fetch error ${res.status}: ${errorText}`);
+  }
+  const me = (await res.json()) as { id?: number };
+  if (typeof me.id !== "number") {
+    throw new Error("Backlog myself response missing id");
+  }
+  return me.id;
+}
+
+type BacklogComment = {
+  id: number;
+  createdUser?: { id?: number };
+};
+
+async function fetchIssueCommentsPage(params: {
+  spaceId: string;
+  apiKey: string;
+  issueKey: string;
+  maxId?: number;
+}): Promise<BacklogComment[]> {
+  const { spaceId, apiKey, issueKey, maxId } = params;
+
+  const query = new URLSearchParams();
+  query.set("apiKey", apiKey);
+  query.set("count", "100");
+  query.set("order", "desc");
+  if (maxId !== undefined) {
+    query.set("maxId", String(maxId));
+  }
+
+  const url = `https://${spaceId}.backlog.com/api/v2/issues/${encodeURIComponent(
+    issueKey,
+  )}/comments?${query.toString()}`;
+
+  const res = await fetch(url);
+  if (!res.ok) {
+    const errorText = await res.text().catch(() => "<no body>");
+    throw new Error(
+      `Backlog comments fetch error ${res.status} (${issueKey}): ${errorText}`,
+    );
+  }
+  const data = await res.json();
+  return Array.isArray(data) ? (data as BacklogComment[]) : [];
+}
+
+async function hasUserCommentedOnIssue(params: {
+  spaceId: string;
+  apiKey: string;
+  issueKey: string;
+  myUserId: number;
+}): Promise<boolean> {
+  const { spaceId, apiKey, issueKey, myUserId } = params;
+  let maxId: number | undefined;
+
+  for (let page = 0; page < COMMENTS_MAX_PAGES; page++) {
+    const comments = await fetchIssueCommentsPage({
+      spaceId,
+      apiKey,
+      issueKey,
+      maxId,
+    });
+    if (comments.length === 0) return false;
+
+    if (comments.some((c) => c.createdUser?.id === myUserId)) {
+      return true;
+    }
+
+    if (comments.length < 100) return false;
+
+    const last = comments[comments.length - 1];
+    if (typeof last.id !== "number") return false;
+    maxId = last.id - 1;
+  }
+
+  console.warn(
+    `[nippo/slack-to-backlog] hasUserCommentedOnIssue: hit MAX_PAGES (${COMMENTS_MAX_PAGES}) for ${issueKey}; treating as not commented`,
+  );
+  return false;
+}
+
 async function findIssueForToday(params: {
   spaceId: string;
   apiKey: string;
@@ -968,7 +1068,6 @@ async function postBacklogComment(params: {
 // ---------------------------------------------------------------------------
 
 const KV_APIKEY_PREFIX = "backlog:apikey:";
-const KV_POSTED_PREFIX = "nippo:posted:";
 const KV_RATE_PREFIX = "nippo:rate:";
 
 async function getUserApiKey(slackUserId: string): Promise<string | null> {
@@ -986,27 +1085,16 @@ async function setUserApiKey(
 
 type GuardFailure =
   | { ok: false; reason: "empty" }
-  | { ok: false; reason: "duplicate" }
   | { ok: false; reason: "rate_limited"; remainingSec: number };
 
 type GuardResult = { ok: true } | GuardFailure;
 
 async function checkPostGuards(params: {
   userId: string;
-  channelId: string;
-  messageTs: string;
   messageText: string;
 }): Promise<GuardResult> {
   if (params.messageText.trim().length === 0) {
     return { ok: false, reason: "empty" };
-  }
-
-  if (params.channelId && params.messageTs) {
-    const key = postedKey(params.channelId, params.messageTs);
-    const exists = await redis.get(key);
-    if (exists !== null && exists !== undefined) {
-      return { ok: false, reason: "duplicate" };
-    }
   }
 
   const rateKey = `${KV_RATE_PREFIX}${params.userId}`;
@@ -1023,28 +1111,10 @@ async function checkPostGuards(params: {
   return { ok: true };
 }
 
-async function recordPosted(params: {
-  userId: string;
-  channelId: string;
-  messageTs: string;
-}): Promise<void> {
-  const promises: Promise<unknown>[] = [
-    redis.set(`${KV_RATE_PREFIX}${params.userId}`, "1", {
-      ex: RATE_LIMIT_WINDOW_SEC,
-    }),
-  ];
-  if (params.channelId && params.messageTs) {
-    promises.push(
-      redis.set(postedKey(params.channelId, params.messageTs), "1", {
-        ex: POSTED_TTL_SEC,
-      }),
-    );
-  }
-  await Promise.all(promises);
-}
-
-function postedKey(channelId: string, messageTs: string): string {
-  return `${KV_POSTED_PREFIX}${channelId}:${messageTs}`;
+async function recordRateLimit(slackUserId: string): Promise<void> {
+  await redis.set(`${KV_RATE_PREFIX}${slackUserId}`, "1", {
+    ex: RATE_LIMIT_WINDOW_SEC,
+  });
 }
 
 // ---------------------------------------------------------------------------
