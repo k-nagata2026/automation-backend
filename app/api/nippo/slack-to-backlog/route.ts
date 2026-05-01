@@ -453,18 +453,12 @@ async function safeUpdateModal(params: {
   try {
     await updateModal(params);
   } catch (error) {
-    console.error(
-      "[nippo/slack-to-backlog] failed to update modal:",
-      error,
-    );
+    console.error("[nippo/slack-to-backlog] failed to update modal:", error);
   }
 }
 
 function updateResponse(view: ModalView): Response {
-  return Response.json(
-    { response_action: "update", view },
-    { status: 200 },
-  );
+  return Response.json({ response_action: "update", view }, { status: 200 });
 }
 
 // ---------------------------------------------------------------------------
@@ -550,8 +544,8 @@ function buildSuccessView(params: {
   };
 }
 
-function buildNoIssueView(candidates: string[]): ModalView {
-  const list = candidates.map((c) => `\u2022 ${c}`).join("\n");
+function buildNoIssueView(today: Date): ModalView {
+  const label = formatJstDate(today);
   return {
     type: "modal",
     callback_id: "nippo_no_issue",
@@ -562,7 +556,7 @@ function buildNoIssueView(candidates: string[]): ModalView {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: ":warning: 今週分の日報課題が見つかりませんでした。Backlog側のタイトルをご確認ください。",
+          text: `:warning: 今日（${label}）を含む日報課題がBacklogプロジェクト \`${BACKLOG_PROJECT_KEY}\` に見つかりませんでした。`,
         },
       },
       {
@@ -570,7 +564,7 @@ function buildNoIssueView(candidates: string[]): ModalView {
         elements: [
           {
             type: "mrkdwn",
-            text: `検索したタイトル:\n${list}`,
+            text: "タイトル形式は `YYYY年M月度(M/D~M/D)` を想定しています（半角/全角の括弧、`~`/`〜`/`～` どれでも可）。該当週の課題が作成されているかご確認ください。",
           },
         ],
       },
@@ -693,7 +687,7 @@ function viewForResult(result: PostResult): ModalView {
       url: result.url,
     });
   }
-  return buildNoIssueView(result.candidates);
+  return buildNoIssueView(result.today);
 }
 
 function resolveUserLabel(user: SlackUser | undefined): string {
@@ -707,7 +701,7 @@ function resolveUserLabel(user: SlackUser | undefined): string {
 
 type PostResult =
   | { ok: true; issueKey: string; summary: string; url: string }
-  | { ok: false; candidates: string[] };
+  | { ok: false; today: Date };
 
 async function postNippoComment(params: {
   apiKey: string;
@@ -723,19 +717,19 @@ async function postNippoComment(params: {
     projectKey: BACKLOG_PROJECT_KEY,
   });
 
-  const candidates = buildTitleCandidates();
-  const issue = await findIssueByCandidates({
+  const today = todayJstDateOnly();
+  const issue = await findIssueForToday({
     spaceId,
     apiKey,
     projectId,
-    candidates,
+    today,
   });
 
   if (!issue) {
     console.error(
-      `[nippo/slack-to-backlog] no matching issue for ${userLabel}. tried: ${candidates.join(" | ")}`,
+      `[nippo/slack-to-backlog] no matching issue for ${userLabel} on ${formatJstDate(today)}.`,
     );
-    return { ok: false, candidates };
+    return { ok: false, today };
   }
 
   const content = buildCommentContent(issue.summary, messageText);
@@ -756,89 +750,68 @@ async function postNippoComment(params: {
 }
 
 function buildCommentContent(title: string, messageText: string): string {
-  return [
-    `# 日報 ${title}`,
-    "",
-    normalizeSlackText(messageText),
-    "",
-    "---",
-  ].join("\n");
-}
-
-type TitleSpec = { label: string; start: string; end: string };
-
-function buildTitleCandidates(now: Date = new Date()): string[] {
-  const jst = toJst(now);
-  const monday = startOfWeekMonday(jst);
-  const friday = addDays(monday, 4);
-
-  const startYear = monday.getUTCFullYear();
-  const startMonth = monday.getUTCMonth() + 1;
-  const startDay = monday.getUTCDate();
-  const endMonth = friday.getUTCMonth() + 1;
-  const endDay = friday.getUTCDate();
-
-  const specs: TitleSpec[] = [];
-
-  if (startMonth === endMonth) {
-    specs.push({
-      label: `${startMonth}月度`,
-      start: `${startMonth}/${startDay}`,
-      end: `${endMonth}/${endDay}`,
-    });
-  } else {
-    const startMonthLastDay = lastDayOfMonth(startYear, startMonth);
-    specs.push({
-      label: `${startMonth}月度`,
-      start: `${startMonth}/${startDay}`,
-      end: `${startMonth}/${startMonthLastDay}`,
-    });
-    specs.push({
-      label: `${endMonth}月度`,
-      start: `${endMonth}/1`,
-      end: `${endMonth}/${endDay}`,
-    });
-    specs.push({
-      label: `${startMonth}/${endMonth}月度`,
-      start: `${startMonth}/${startDay}`,
-      end: `${endMonth}/${endDay}`,
-    });
-    specs.push({
-      label: `${startMonth}月 ${endMonth}月度`,
-      start: `${startMonth}/${startDay}`,
-      end: `${endMonth}/${endDay}`,
-    });
-  }
-
-  const tildes = ["~", "〜"];
-  const candidates: string[] = [];
-  for (const spec of specs) {
-    for (const tilde of tildes) {
-      candidates.push(
-        `${startYear}年${spec.label}(${spec.start}${tilde}${spec.end})`,
-      );
-    }
-  }
-  return candidates;
-}
-
-function lastDayOfMonth(year: number, month: number): number {
-  return new Date(Date.UTC(year, month, 0)).getUTCDate();
-}
-
-function startOfWeekMonday(date: Date): Date {
-  const day = date.getUTCDay();
-  const diffToMonday = (day + 6) % 7;
-  return addDays(date, -diffToMonday);
-}
-
-function addDays(date: Date, days: number): Date {
-  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
+  return [`# 日報`, "", normalizeSlackText(messageText), "", "---"].join("\n");
 }
 
 function toJst(date: Date): Date {
   const jstOffsetMs = 9 * 60 * 60 * 1000;
   return new Date(date.getTime() + jstOffsetMs);
+}
+
+function todayJstDateOnly(now: Date = new Date()): Date {
+  const jst = toJst(now);
+  return new Date(
+    Date.UTC(jst.getUTCFullYear(), jst.getUTCMonth(), jst.getUTCDate()),
+  );
+}
+
+function formatJstDate(date: Date): string {
+  return `${date.getUTCFullYear()}/${date.getUTCMonth() + 1}/${date.getUTCDate()}`;
+}
+
+const WEEKLY_TITLE_PATTERN =
+  /^(\d{4})年(\d{1,2})月度\s*[(（]\s*(\d{1,2})\/(\d{1,2})\s*[~〜～]\s*(\d{1,2})\/(\d{1,2})\s*[)）]/;
+
+type ParsedWeeklyIssue = {
+  issueKey: string;
+  summary: string;
+  start: Date;
+  end: Date;
+};
+
+function parseWeeklyTitle(issue: BacklogIssue): ParsedWeeklyIssue | null {
+  const m = issue.summary.match(WEEKLY_TITLE_PATTERN);
+  if (!m) return null;
+
+  const year = Number(m[1]);
+  const startMonth = Number(m[3]);
+  const startDay = Number(m[4]);
+  const endMonth = Number(m[5]);
+  const endDay = Number(m[6]);
+
+  const endYear = endMonth < startMonth ? year + 1 : year;
+
+  const start = new Date(Date.UTC(year, startMonth - 1, startDay));
+  const end = new Date(Date.UTC(endYear, endMonth - 1, endDay));
+
+  return {
+    issueKey: issue.issueKey,
+    summary: issue.summary,
+    start,
+    end,
+  };
+}
+
+function adjacentLabelMonths(
+  today: Date,
+): Array<{ year: number; month: number }> {
+  const year = today.getUTCFullYear();
+  const month = today.getUTCMonth() + 1;
+  const prev =
+    month === 1 ? { year: year - 1, month: 12 } : { year, month: month - 1 };
+  const next =
+    month === 12 ? { year: year + 1, month: 1 } : { year, month: month + 1 };
+  return [prev, { year, month }, next];
 }
 
 function normalizeSlackText(text: string): string {
@@ -886,40 +859,82 @@ async function fetchProjectId(params: {
   return project.id;
 }
 
-async function findIssueByCandidates(params: {
+async function findIssueForToday(params: {
   spaceId: string;
   apiKey: string;
   projectId: number;
-  candidates: string[];
+  today: Date;
 }): Promise<BacklogIssue | null> {
-  const { spaceId, apiKey, projectId, candidates } = params;
+  const { spaceId, apiKey, projectId, today } = params;
 
-  for (const candidate of candidates) {
-    const query = new URLSearchParams();
-    query.set("apiKey", apiKey);
-    query.append("projectId[]", String(projectId));
-    query.set("keyword", candidate);
-    query.set("count", "100");
-
-    const url = `https://${spaceId}.backlog.com/api/v2/issues?${query.toString()}`;
-
-    const res = await fetch(url);
-    if (!res.ok) {
-      const errorText = await res.text().catch(() => "<no body>");
-      console.warn(
-        `[nippo/slack-to-backlog] issue search failed (${res.status}) for "${candidate}": ${errorText}`,
-      );
-      continue;
-    }
-
-    const issues = (await res.json()) as BacklogIssue[];
-    const match = issues.find((issue) => issue.summary === candidate);
-    if (match) {
-      return match;
+  const labels = adjacentLabelMonths(today);
+  const fetched = new Map<string, BacklogIssue>();
+  for (const { year, month } of labels) {
+    const issues = await searchIssuesByKeyword({
+      spaceId,
+      apiKey,
+      projectId,
+      keyword: `${year}年${month}月度`,
+    });
+    for (const issue of issues) {
+      fetched.set(issue.issueKey, issue);
     }
   }
 
-  return null;
+  const parsed: ParsedWeeklyIssue[] = [];
+  for (const issue of fetched.values()) {
+    const p = parseWeeklyTitle(issue);
+    if (p) parsed.push(p);
+  }
+
+  const todayMs = today.getTime();
+  const containing = parsed.filter(
+    (p) => p.start.getTime() <= todayMs && todayMs <= p.end.getTime(),
+  );
+
+  if (containing.length === 0) {
+    return null;
+  }
+
+  containing.sort((a, b) => {
+    if (b.start.getTime() !== a.start.getTime()) {
+      return b.start.getTime() - a.start.getTime();
+    }
+    const aRange = a.end.getTime() - a.start.getTime();
+    const bRange = b.end.getTime() - b.start.getTime();
+    return aRange - bRange;
+  });
+
+  const best = containing[0];
+  return { issueKey: best.issueKey, summary: best.summary };
+}
+
+async function searchIssuesByKeyword(params: {
+  spaceId: string;
+  apiKey: string;
+  projectId: number;
+  keyword: string;
+}): Promise<BacklogIssue[]> {
+  const { spaceId, apiKey, projectId, keyword } = params;
+
+  const query = new URLSearchParams();
+  query.set("apiKey", apiKey);
+  query.append("projectId[]", String(projectId));
+  query.set("keyword", keyword);
+  query.set("count", "100");
+
+  const url = `https://${spaceId}.backlog.com/api/v2/issues?${query.toString()}`;
+
+  const res = await fetch(url);
+  if (!res.ok) {
+    const errorText = await res.text().catch(() => "<no body>");
+    console.warn(
+      `[nippo/slack-to-backlog] issue search failed (${res.status}) keyword="${keyword}": ${errorText}`,
+    );
+    return [];
+  }
+
+  return (await res.json()) as BacklogIssue[];
 }
 
 async function postBacklogComment(params: {
