@@ -1,0 +1,10 @@
+export const SHORTCUT_CALLBACK_ID = "send_nippo_to_backlog";
+export const VIEW_CALLBACK_ID = "backlog_apikey_register";
+export const SETUP_COMMAND = "/nippo-setup";
+export const BACKLOG_PROJECT_KEY = "NIPPO";
+export const APIKEY_BLOCK_ID = "apikey_block";
+export const APIKEY_ACTION_ID = "apikey_input";
+export const SIGNATURE_VERSION = "v0";
+export const SIGNATURE_TOLERANCE_SEC = 60 * 5;
+export const RATE_LIMIT_WINDOW_SEC = 60 * 5;
+export const COMMENTS_MAX_PAGES = 5;
