@@ -1,5 +1,6 @@
 export const SHORTCUT_CALLBACK_ID = "send_nippo_to_backlog";
 export const VIEW_CALLBACK_ID = "backlog_apikey_register";
+export const OVERWRITE_CALLBACK_ID = "nippo_overwrite_confirm";
 export const SETUP_COMMAND = "/nippo-setup";
 export const BACKLOG_PROJECT_KEY = "NIPPO";
 export const APIKEY_BLOCK_ID = "apikey_block";

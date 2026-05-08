@@ -2,6 +2,7 @@ import {
   APIKEY_ACTION_ID,
   APIKEY_BLOCK_ID,
   BACKLOG_PROJECT_KEY,
+  OVERWRITE_CALLBACK_ID,
   RATE_LIMIT_WINDOW_SEC,
   VIEW_CALLBACK_ID,
 } from "./constants";
@@ -174,18 +175,21 @@ function buildEmptyMessageView(): ModalView {
 function buildAlreadyCommentedView(params: {
   summary: string;
   url: string;
+  privateMetadata: string;
 }): ModalView {
   return {
     type: "modal",
-    callback_id: "nippo_already_commented",
+    callback_id: OVERWRITE_CALLBACK_ID,
     title: { type: "plain_text", text: "投稿済み" },
-    close: { type: "plain_text", text: "閉じる" },
+    submit: { type: "plain_text", text: "上書きする" },
+    close: { type: "plain_text", text: "キャンセル" },
+    private_metadata: params.privateMetadata,
     blocks: [
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `:warning: 今日の日報コメントは既に投稿済みです。\n*課題:* <${params.url}|${params.summary}>`,
+          text: `:warning: 今日の日報コメントは既に投稿済みです。\n*課題:* <${params.url}|${params.summary}>\n\n選択中のメッセージ内容で上書きしますか？`,
         },
       },
       {
@@ -193,7 +197,7 @@ function buildAlreadyCommentedView(params: {
         elements: [
           {
             type: "mrkdwn",
-            text: "同じ日に再投稿したい場合はBacklog側で既存コメントを削除してから実行してください。",
+            text: "「上書きする」を押すと既存コメントが今回のメッセージ内容で更新されます。",
           },
         ],
       },
@@ -235,7 +239,10 @@ export function viewForGuardFailure(guard: GuardFailure): ModalView {
   }
 }
 
-export function viewForResult(result: PostResult): ModalView {
+export function viewForResult(
+  result: PostResult,
+  overwriteMetadata?: string,
+): ModalView {
   if (result.ok) {
     return buildSuccessView({
       issueKey: result.issueKey,
@@ -249,5 +256,6 @@ export function viewForResult(result: PostResult): ModalView {
   return buildAlreadyCommentedView({
     summary: result.summary,
     url: result.url,
+    privateMetadata: overwriteMetadata ?? "",
   });
 }

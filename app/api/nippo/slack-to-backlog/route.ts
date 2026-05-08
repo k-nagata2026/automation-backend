@@ -1,9 +1,10 @@
 import { after } from "next/server";
 
-import { postNippoComment } from "./components/backlog";
+import { overwriteNippoComment, postNippoComment } from "./components/backlog";
 import {
   APIKEY_ACTION_ID,
   APIKEY_BLOCK_ID,
+  OVERWRITE_CALLBACK_ID,
   SETUP_COMMAND,
   SHORTCUT_CALLBACK_ID,
   VIEW_CALLBACK_ID,
@@ -16,7 +17,9 @@ import {
 } from "./components/kv";
 import {
   decodeContext,
+  decodeOverwriteContext,
   encodeContext,
+  encodeOverwriteContext,
   openModal,
   resolveUserLabel,
   safeUpdateModal,
@@ -179,7 +182,20 @@ async function handleMessageAction(
       if (result.ok) {
         await recordRateLimit(userId);
       }
-      await updateModal({ viewId, view: viewForResult(result) });
+      const overwriteMetadata =
+        !result.ok && result.reason === "already_commented"
+          ? encodeOverwriteContext({
+              messageText,
+              issueKey: result.issueKey,
+              commentId: result.commentId,
+              summary: result.summary,
+              url: result.url,
+            })
+          : undefined;
+      await updateModal({
+        viewId,
+        view: viewForResult(result, overwriteMetadata),
+      });
     } catch (error) {
       console.error("[nippo/slack-to-backlog] backlog post failed:", error);
       await safeUpdateModal({
@@ -196,7 +212,22 @@ async function handleViewSubmission(
   payload: SlackViewSubmissionPayload,
 ): Promise<Response> {
   const view = payload.view;
-  if (!view || view.callback_id !== VIEW_CALLBACK_ID) return ok();
+  if (!view) return ok();
+
+  if (view.callback_id === VIEW_CALLBACK_ID) {
+    return await handleApiKeyRegistration(payload);
+  }
+  if (view.callback_id === OVERWRITE_CALLBACK_ID) {
+    return await handleOverwriteSubmission(payload);
+  }
+  return ok();
+}
+
+async function handleApiKeyRegistration(
+  payload: SlackViewSubmissionPayload,
+): Promise<Response> {
+  const view = payload.view;
+  if (!view) return ok();
 
   const userId = payload.user?.id;
   if (!userId) return ok();
@@ -240,7 +271,20 @@ async function handleViewSubmission(
         if (result.ok) {
           await recordRateLimit(userId);
         }
-        await updateModal({ viewId, view: viewForResult(result) });
+        const overwriteMetadata =
+          !result.ok && result.reason === "already_commented"
+            ? encodeOverwriteContext({
+                messageText: ctx.messageText,
+                issueKey: result.issueKey,
+                commentId: result.commentId,
+                summary: result.summary,
+                url: result.url,
+              })
+            : undefined;
+        await updateModal({
+          viewId,
+          view: viewForResult(result, overwriteMetadata),
+        });
       } catch (error) {
         console.error(
           "[nippo/slack-to-backlog] post-after-registration failed:",
@@ -249,6 +293,67 @@ async function handleViewSubmission(
         await safeUpdateModal({
           viewId,
           view: buildErrorView("Backlogへの投稿に失敗しました。"),
+        });
+      }
+    });
+  }
+
+  return updateResponse(buildProcessingView());
+}
+
+async function handleOverwriteSubmission(
+  payload: SlackViewSubmissionPayload,
+): Promise<Response> {
+  const view = payload.view;
+  if (!view) return ok();
+
+  const userId = payload.user?.id;
+  if (!userId) return ok();
+
+  const ctx = decodeOverwriteContext(view.private_metadata);
+  if (!ctx) {
+    return updateResponse(
+      buildErrorView("上書き対象の情報を取得できませんでした。"),
+    );
+  }
+
+  const apiKey = await getUserApiKey(userId);
+  if (!apiKey) {
+    return updateResponse(
+      buildErrorView(
+        "Backlog APIキーが登録されていません。`/nippo-setup` で再登録してください。",
+      ),
+    );
+  }
+
+  const viewId = view.id;
+  if (viewId) {
+    after(async () => {
+      try {
+        await overwriteNippoComment({
+          apiKey,
+          messageText: ctx.messageText,
+          issueKey: ctx.issueKey,
+          commentId: ctx.commentId,
+        });
+        await recordRateLimit(userId);
+        await updateModal({
+          viewId,
+          view: viewForResult({
+            ok: true,
+            issueKey: ctx.issueKey,
+            summary: ctx.summary,
+            url: ctx.url,
+          }),
+        });
+      } catch (error) {
+        console.error(
+          "[nippo/slack-to-backlog] backlog overwrite failed:",
+          error,
+        );
+        await safeUpdateModal({
+          viewId,
+          view: buildErrorView("Backlogコメントの上書きに失敗しました。"),
         });
       }
     });
