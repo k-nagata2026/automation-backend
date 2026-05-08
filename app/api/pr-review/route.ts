@@ -7,6 +7,8 @@ export const maxDuration = 300;
 
 const MODEL = "claude-opus-4-7";
 const MAX_DIFF_BYTES = 180_000;
+// zero-accel.slack.com の #claude_code_review チャンネル
+const SLACK_CHANNEL_ID = "C0B2JAS7NLR";
 
 // ---------- Types ----------
 
@@ -106,7 +108,7 @@ export async function POST(req: Request): Promise<Response> {
       });
       await postSlack({
         token: env.slackToken,
-        channel: env.slackChannel,
+        channel: SLACK_CHANNEL_ID,
         pr,
         repo,
         summary: result.summary,
@@ -126,7 +128,6 @@ type ReviewEnv = {
   privateKey: string;
   anthropicKey: string;
   slackToken: string;
-  slackChannel: string;
 };
 
 function loadEnv(): ReviewEnv {
@@ -135,7 +136,6 @@ function loadEnv(): ReviewEnv {
     privateKey: loadPrivateKey(),
     anthropicKey: required("ANTHROPIC_API_KEY"),
     slackToken: required("SLACK_BOT_TOKEN"),
-    slackChannel: required("SLACK_CHANNEL_ID"),
   };
 }
 

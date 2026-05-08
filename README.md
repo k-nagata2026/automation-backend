@@ -47,3 +47,48 @@ APIキーは `backlog:apikey:<slack_user_id>` キーでUpstash Redisに保存さ
 | メッセージ本文が空            | 「メッセージが空です」                       | `message.text.trim()` が空                                                                                                                        |
 | 同一ユーザーが 5 分以内に連投 | 「連続実行のため待機中（あと約 X 分 Y 秒）」 | `nippo:rate:<slack_user_id>` が Upstash Redis に存在（投稿成功時に 5 分 TTL で記録）                                                              |
 | 同日に既にコメント済み        | 「投稿済み」（上書き確認モーダル）           | Backlog `/api/v2/users/myself` で取得した自分の Backlog ID が、`/api/v2/issues/{key}/comments` の `createdUser.id` に含まれ、かつ `created` が JST で本日のものを検出（最大 5 ページ＝500 コメントまで遡る）。検出時は「上書きするか」を確認するモーダルを表示し、ユーザーが「上書きする」を選んだ場合のみ既存コメントを `PATCH /api/v2/issues/{key}/comments/{commentId}` で更新する。 |
+
+## 機能2. PRレビュー（Claude）
+
+GitHub App として動作し、PR が作成・更新されるたびに Claude が差分をレビューして PR にコメント投稿し、Slack にサマリを通知する。リポジトリ側にワークフローファイルを置く必要はなく、対象リポジトリに App をインストールするだけで有効になる。
+
+### 2.1 エンドポイント
+
+`POST https://<your-domain>/api/pr-review`
+
+GitHub App の Webhook 受信専用。`X-Hub-Signature-256` を `GITHUB_WEBHOOK_SECRET` で検証し、`pull_request` イベントの `opened` / `synchronize` / `reopened` のみ処理する（draft PR は除外）。重い処理は `next/server` の `after()` でバックグラウンド実行し、GitHub には即座に 200 を返す。
+
+### 2.2 環境変数
+
+| 変数名                     | 用途                                                                                  |
+| -------------------------- | ------------------------------------------------------------------------------------- |
+| `GITHUB_APP_ID`            | GitHub App の App ID                                                                  |
+| `GITHUB_APP_PRIVATE_KEY`   | App の秘密鍵。PEM 直貼り、もしくは base64 エンコードのどちらでも可                    |
+| `GITHUB_WEBHOOK_SECRET`    | Webhook 署名検証用シークレット                                                        |
+| `ANTHROPIC_API_KEY`        | Anthropic API キー（モデル: `claude-opus-4-7`）                                       |
+| `SLACK_BOT_TOKEN`          | 機能1と共用。Bot スコープ `chat:write` 必須                                           |
+
+通知先 Slack チャンネルは `route.ts` 内に固定（`C0B2JAS7NLR` / zero-accel ワークスペース）。変更時はソース修正＋再デプロイ。
+
+### 2.3 GitHub App の設定
+
+https://github.com/settings/apps/new で作成：
+
+- **Webhook URL**: `https://<your-domain>/api/pr-review`
+- **Webhook secret**: `GITHUB_WEBHOOK_SECRET` と同じ値
+- **Repository permissions**:
+  - Pull requests: **Read & write**
+  - Contents: **Read**
+  - Metadata: **Read**
+- **Subscribe to events**: **Pull request**
+
+作成後に App ID をメモし、Generate a private key で `.pem` をダウンロード。`base64 -i <pem>` で base64 化したものを Vercel の `GITHUB_APP_PRIVATE_KEY` に登録する。最後に App ページの **Install App** から対象リポジトリにインストール。
+
+### 2.4 処理フロー
+
+1. GitHub から `pull_request` Webhook を受信し、署名を検証。
+2. App JWT（RS256）を生成し、ペイロードの `installation.id` から installation access token を発行。
+3. `GET /repos/{repo}/pulls/{n}` を `Accept: application/vnd.github.v3.diff` で叩いて差分を取得（180KB 超は末尾を打ち切る）。
+4. Claude (`claude-opus-4-7`) に差分を渡し、`{ review, summary }` の JSON で出力させる。レビュー観点は バグ / セキュリティ / パフォーマンス / 可読性 / Liquid 構文（Shopify・ecforce テーマ向け）で、各指摘に重大度ラベル（blocker / major / minor / nit）を付与する。
+5. `review` を PR にコメント投稿（`POST /repos/{repo}/issues/{n}/comments`）。
+6. `summary` を Slack の `chat.postMessage` で `SLACK_CHANNEL_ID` に送信（PR タイトル・URL・作成者を併記）。
