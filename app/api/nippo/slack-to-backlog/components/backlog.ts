@@ -33,6 +33,7 @@ export type PostResult =
       issueKey: string;
       summary: string;
       url: string;
+      commentId: number;
     };
 
 const WEEKLY_TITLE_PATTERN =
@@ -68,20 +69,21 @@ export async function postNippoComment(params: {
 
   const url = `https://${spaceId}.backlog.com/view/${issue.issueKey}`;
 
-  const alreadyCommented = await hasUserCommentedOnIssue({
+  const existingCommentId = await findUsersTodayCommentId({
     spaceId,
     apiKey,
     issueKey: issue.issueKey,
     myUserId,
     today,
   });
-  if (alreadyCommented) {
+  if (existingCommentId !== null) {
     return {
       ok: false,
       reason: "already_commented",
       issueKey: issue.issueKey,
       summary: issue.summary,
       url,
+      commentId: existingCommentId,
     };
   }
 
@@ -212,13 +214,13 @@ async function fetchIssueCommentsPage(params: {
   return Array.isArray(data) ? (data as BacklogComment[]) : [];
 }
 
-async function hasUserCommentedOnIssue(params: {
+async function findUsersTodayCommentId(params: {
   spaceId: string;
   apiKey: string;
   issueKey: string;
   myUserId: number;
   today: Date;
-}): Promise<boolean> {
+}): Promise<number | null> {
   const { spaceId, apiKey, issueKey, myUserId, today } = params;
   let maxId: number | undefined;
   const todayLabel = formatJstDate(today);
@@ -230,31 +232,30 @@ async function hasUserCommentedOnIssue(params: {
       issueKey,
       maxId,
     });
-    if (comments.length === 0) return false;
+    if (comments.length === 0) return null;
 
-    if (
-      comments.some((c) => {
-        if (c.createdUser?.id !== myUserId) return false;
-        if (typeof c.created !== "string" || c.created.length === 0) return false;
-        const createdAt = new Date(c.created);
-        if (!Number.isFinite(createdAt.getTime())) return false;
-        return formatJstDate(todayJstDateOnly(createdAt)) === todayLabel;
-      })
-    ) {
-      return true;
+    const matched = comments.find((c) => {
+      if (c.createdUser?.id !== myUserId) return false;
+      if (typeof c.created !== "string" || c.created.length === 0) return false;
+      const createdAt = new Date(c.created);
+      if (!Number.isFinite(createdAt.getTime())) return false;
+      return formatJstDate(todayJstDateOnly(createdAt)) === todayLabel;
+    });
+    if (matched && typeof matched.id === "number") {
+      return matched.id;
     }
 
-    if (comments.length < 100) return false;
+    if (comments.length < 100) return null;
 
     const last = comments[comments.length - 1];
-    if (typeof last.id !== "number") return false;
+    if (typeof last.id !== "number") return null;
     maxId = last.id - 1;
   }
 
   console.warn(
-    `[nippo/slack-to-backlog] hasUserCommentedOnIssue: hit MAX_PAGES (${COMMENTS_MAX_PAGES}) for ${issueKey}; treating as not commented`,
+    `[nippo/slack-to-backlog] findUsersTodayCommentId: hit MAX_PAGES (${COMMENTS_MAX_PAGES}) for ${issueKey}; treating as not commented`,
   );
-  return false;
+  return null;
 }
 
 async function findIssueForToday(params: {
@@ -347,6 +348,33 @@ async function postBacklogComment(params: {
 
   const res = await fetch(url, {
     method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text().catch(() => "<no body>");
+    throw new Error(`Backlog API error ${res.status}: ${errorText}`);
+  }
+}
+
+export async function overwriteNippoComment(params: {
+  apiKey: string;
+  messageText: string;
+  issueKey: string;
+  commentId: number;
+}): Promise<void> {
+  const { apiKey, messageText, issueKey, commentId } = params;
+  const spaceId = requireEnv("BACKLOG_SPACE_ID");
+  const content = buildCommentContent(messageText);
+
+  const url = `https://${spaceId}.backlog.com/api/v2/issues/${encodeURIComponent(
+    issueKey,
+  )}/comments/${commentId}?apiKey=${encodeURIComponent(apiKey)}`;
+  const body = new URLSearchParams({ content });
+
+  const res = await fetch(url, {
+    method: "PATCH",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });

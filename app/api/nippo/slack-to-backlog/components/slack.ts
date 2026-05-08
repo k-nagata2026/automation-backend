@@ -56,6 +56,14 @@ export type ShortcutContext = {
   userLabel: string;
 };
 
+export type OverwriteContext = {
+  messageText: string;
+  issueKey: string;
+  commentId: number;
+  summary: string;
+  url: string;
+};
+
 export type ModalView = Record<string, unknown>;
 
 export function verifySlackSignature(req: Request, rawBody: string): boolean {
@@ -100,6 +108,38 @@ export function decodeContext(raw: string | undefined): ShortcutContext | null {
     const userLabel =
       typeof parsed.userLabel === "string" ? parsed.userLabel : "unknown";
     return { messageText, userLabel };
+  } catch {
+    return null;
+  }
+}
+
+export function encodeOverwriteContext(ctx: OverwriteContext): string {
+  return JSON.stringify(ctx);
+}
+
+export function decodeOverwriteContext(
+  raw: string | undefined,
+): OverwriteContext | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isObject(parsed)) return null;
+    if (
+      typeof parsed.messageText !== "string" ||
+      typeof parsed.issueKey !== "string" ||
+      typeof parsed.commentId !== "number" ||
+      typeof parsed.summary !== "string" ||
+      typeof parsed.url !== "string"
+    ) {
+      return null;
+    }
+    return {
+      messageText: parsed.messageText,
+      issueKey: parsed.issueKey,
+      commentId: parsed.commentId,
+      summary: parsed.summary,
+      url: parsed.url,
+    };
   } catch {
     return null;
   }
